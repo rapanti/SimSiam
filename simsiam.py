@@ -64,6 +64,8 @@ def main(args):
 
     optimizer = torch.optim.SGD(optim_params, init_lr, momentum=args.momentum, weight_decay=args.weight_decay)
 
+    fp16 = torch.cuda.amp.GradScaler() if args.fp16 else None
+
     # ============ optionally resume training ... ============
     to_restore = {"epoch": 0}
     utils.restart_from_checkpoint(
@@ -71,6 +73,7 @@ def main(args):
         run_variables=to_restore,
         model=model,
         optimizer=optimizer,
+        fp16=fp16,
     )
     start_epoch = to_restore["epoch"]
 
@@ -102,8 +105,6 @@ def main(args):
     log_dir = os.path.join(args.output_dir, "summary")
     board = SummaryWriter(log_dir) if utils.is_main_process() else None
 
-    fp16 = torch.cuda.amp.GradScaler() if args.fp16 else None
-
     for epoch in range(start_epoch, args.epochs):
         loader.sampler.set_epoch(epoch)
         adjust_learning_rate(optimizer, init_lr, epoch, args)
@@ -115,6 +116,7 @@ def main(args):
             'optimizer': optimizer.state_dict(),
             'epoch': epoch + 1,
             'args': args,
+            'fp16': fp16.state_dict() if fp16 is not None else None,
         }
         utils.save_on_master(save_dict, os.path.join(args.output_dir, 'checkpoint.pth'))
         if args.saveckp_freq and epoch and epoch % args.saveckp_freq == 0:

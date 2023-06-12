@@ -11,14 +11,11 @@ if __name__ == "__main__":
     slurm_parser.add_argument("--gpus", default=4, type=int)
     slurm_parser.add_argument("--array", default=3, type=int)
     slurm_parser.add_argument("--time", default="23:59:59", type=str)
+    slurm_parser.add_argument("--prefix", default="simsiam", type=str)
+    slurm_parser.add_argument("--suffix", default="def", type=str)
     slurm_args, _ = slurm_parser.parse_known_args()
 
-    cluster_dir = Path("cluster")
-    cluster_dir.mkdir(parents=True, exist_ok=True)
-
-    header = "simsiam"
     exp_dir = "/work/dlclarge2/rapanti-metassl-dino-stn/experiments"
-
     seed = args.seed
     arch = args.arch
     epochs = args.epochs
@@ -32,13 +29,16 @@ if __name__ == "__main__":
         case _:
             args.data_path = "."
 
-    exp_name = f"{header}-{arch}-{dataset}-ep_{epochs}-bs_{bs}-seed_{seed}-default_stg"
+    exp_name = f"{slurm_args.prefix}-{arch}-{dataset}-ep_{epochs}-bs_{bs}-seed_{seed}-{slurm_args.suffix}"
     args.output_dir = output_dir = f"{exp_dir}/{exp_name}"
 
     exp_stg = dict(vars(args))
 
     log_dir = Path(output_dir).joinpath("log")
     log_dir.mkdir(parents=True, exist_ok=True)
+
+    copy_msg = subprocess.call(["cp", "-r", ".", output_dir])
+    print(f"Experiment: {exp_name}")
 
     # Slurm settings
     partition = "mlhiwidlc_gpu-rtx2080-advanced"
@@ -53,7 +53,7 @@ if __name__ == "__main__":
         f"#SBATCH -J {exp_name}",
         f"#SBATCH -o {log_file}",
         f"#SBATCH -e {log_file}",
-        f"#SBATCH --array 0-{sbatch_array}%1",
+        f"#SBATCH --array 0-{sbatch_array}%1" if sbatch_array > 0 else '',
         'echo "Workingdir: $PWD"',
         'echo "Started at $(date)"',
         'echo "Running job $SLURM_JOB_NAME with given JID $SLURM_JOB_ID on queue $SLURM_JOB_PARTITION"',
@@ -66,7 +66,7 @@ if __name__ == "__main__":
         f"--nnodes=1", f"--standalone",
         f"run_train_eval.py"
     ]
-    job_file = cluster_dir.joinpath(exp_name + ".sh")
+    job_file = Path(output_dir).joinpath("job.sh")
     with open(job_file, 'w') as file:
         for line in sbatch:
             file.write(line + " \n")
