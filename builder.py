@@ -4,6 +4,7 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
+import torch
 import torch.nn as nn
 
 
@@ -63,3 +64,9 @@ class SimSiam(nn.Module):
         p2 = self.predictor(z2)  # NxC
 
         return p1, p2, z1.detach(), z2.detach()
+
+    @torch.no_grad()
+    def get_proj(self, x):
+        z = self.encoder(x)
+        p = self.predictor(z)
+        return p, z

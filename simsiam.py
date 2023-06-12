@@ -8,10 +8,13 @@ import argparse
 import json
 import math
 import os
+import random
 from pathlib import Path
 
+import einops
 import torch
 import torch.nn as nn
+import torch.nn.functional as nnf
 import torch.nn.parallel
 import torch.backends.cudnn as cudnn
 import torch.optim
@@ -64,6 +67,8 @@ def main(args):
 
     optimizer = torch.optim.SGD(optim_params, init_lr, momentum=args.momentum, weight_decay=args.weight_decay)
 
+    fp16 = torch.cuda.amp.GradScaler() if args.fp16 else None
+
     # ============ optionally resume training ... ============
     to_restore = {"epoch": 0}
     utils.restart_from_checkpoint(
@@ -71,21 +76,12 @@ def main(args):
         run_variables=to_restore,
         model=model,
         optimizer=optimizer,
+        fp16=fp16,
     )
     start_epoch = to_restore["epoch"]
 
     # ============ preparing data ... ============
-    normalize = transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])
-    augmentation = [
-        transforms.RandomResizedCrop(32, scale=(0.2, 1.)),
-        transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
-        transforms.RandomGrayscale(p=0.2),
-        transforms.RandomApply([transforms.GaussianBlur(3, (0.1, 2))], p=0.5),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        normalize
-    ]
-    transform = TwoCropsTransform(transforms.Compose(augmentation))
+    transform = TwoCropsTransform()
 
     args.batch_size_per_gpu = args.batch_size // utils.get_world_size()
     dataset = datasets.CIFAR10(args.data_path, True, transform)
@@ -99,40 +95,57 @@ def main(args):
         drop_last=True,
     )
 
+    rc_schedule = utils.cosine_scheduler(
+        base_value=args.rc_base,
+        final_value=args.rc_fnl,
+        epochs=args.epochs,
+        niter_per_ep=len(loader),
+    )
+
     log_dir = os.path.join(args.output_dir, "summary")
     board = SummaryWriter(log_dir) if utils.is_main_process() else None
-
-    fp16 = torch.cuda.amp.GradScaler() if args.fp16 else None
 
     for epoch in range(start_epoch, args.epochs):
         loader.sampler.set_epoch(epoch)
         adjust_learning_rate(optimizer, init_lr, epoch, args)
 
-        train(loader, model, criterion, optimizer, epoch, args, fp16, board)
+        train(loader, model, criterion, optimizer, epoch, rc_schedule, args, fp16, board)
 
         save_dict = {
             'model': model.state_dict(),
             'optimizer': optimizer.state_dict(),
             'epoch': epoch + 1,
             'args': args,
+            'fp16': fp16.state_dict() if fp16 is not None else None,
         }
         utils.save_on_master(save_dict, os.path.join(args.output_dir, 'checkpoint.pth'))
         if args.saveckp_freq and epoch and epoch % args.saveckp_freq == 0:
             utils.save_on_master(save_dict, os.path.join(args.output_dir, f'checkpoint{epoch:04}.pth'))
 
 
-def train(loader, model, criterion, optimizer, epoch, args, fp16, board):
+def train(loader, model, criterion, optimizer, epoch, rc_schedule, args, fp16, board,):
     model.train()
     metric_logger = utils.MetricLogger(delimiter=" ")
     header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
     for it, (images, _) in enumerate(metric_logger.log_every(loader, 10, header)):
         it = len(loader) * epoch + it  # global training iteration
+        rc_prob = rc_schedule[it]
 
-        images[0] = images[0].cuda(non_blocking=True)
-        images[1] = images[1].cuda(non_blocking=True)
+        images = [im.cuda(non_blocking=True) for im in images]
+        x1, x2, y0 = images
+        b, h, w, c = x1.shape
+
+        y0 = select_patches(x1, y0, model)
+
+        if rc_prob > 0:
+            random_values = torch.rand(b, device=x1.device)
+            use_random = random_values < rc_prob
+            x2 = torch.where(use_random[:, None, None, None], x2, y0)
+        else:
+            x2 = y0
 
         with torch.cuda.amp.autocast(fp16 is not None):
-            p1, p2, z1, z2 = model(x1=images[0], x2=images[1])
+            p1, p2, z1, z2 = model(x1=x1, x2=x2)
             loss = -(criterion(p1, z2).mean() + criterion(p2, z1).mean()) * 0.5
 
         optimizer.zero_grad()
@@ -168,19 +181,91 @@ def adjust_learning_rate(optimizer, init_lr, epoch, args):
 class TwoCropsTransform:
     """Take two random crops of one image as the query and key."""
 
-    def __init__(self, base_transform):
-        self.base_transform = base_transform
+    def __init__(self):
+        rrc = [transforms.RandomResizedCrop(32, (0.2, 1))]
+        augmentation = [
+            transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
+            transforms.RandomGrayscale(p=0.2),
+            transforms.RandomApply([transforms.GaussianBlur(3, (0.1, 2))], p=0.5),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+        ]
+        self.base_transform = transforms.Compose(rrc + augmentation)
+        self.color_transform = transforms.Compose(augmentation)
 
     def __call__(self, x):
-        q = self.base_transform(x)
-        k = self.base_transform(x)
-        return [q, k]
+        return [self.base_transform(x), self.base_transform(x), self.color_transform(x)]
+
+
+@torch.no_grad()
+def select_patches(x1, x2, model):
+    b, c, height, width = x1.shape
+
+    target = model.module.get_proj(x1)
+
+    _, _, h, w = get_params(x2, (0.2, 1))
+    unfolded = nnf.unfold(x2, (h, w), stride=4)
+    unfolded = einops.rearrange(unfolded, "b (c h w) n -> (b n) c h w", c=c, h=h, w=w)
+    samples = nnf.interpolate(unfolded, (32, 32), mode='bilinear', antialias=True)
+    embeds = model.module.get_proj(samples)
+    out = process_patches(target, samples, embeds)
+
+    return out
+
+
+def process_patches(target, samples, embeds):
+    p1, z1 = target
+    p2, z2 = embeds
+
+    b = p1.size(0)
+    bs = samples.size(0)
+    n = bs // b
+    p1 = p1.repeat(1, n)
+    z1 = z1.repeat(1, n)
+    p1 = einops.rearrange(p1, "b (n d) -> (b n) d", n=n)
+    z1 = einops.rearrange(z1, "b (n d) -> (b n) d", n=n)
+
+    # loss = nnf.cosine_similarity(student_out, tmp, dim=-1)
+    loss = nnf.cosine_similarity(p1, z2) + nnf.cosine_similarity(p2, z1)
+    loss = einops.rearrange(loss, "(b n) -> b n", n=n)
+    indices = nnf.one_hot(loss.argmin(dim=-1), num_classes=n).type(samples.dtype)
+    samples = einops.rearrange(samples, "(b n) c h w -> b n c h w", n=n)
+    patches = torch.einsum("b n, b n c h w -> b c h w", indices, samples)
+    return patches
+
+
+def get_params(img, scale, ratio=(3.0 / 4.0, 4.0 / 3.0)):
+    batch, channels, height, width = img.shape
+    area = height * width
+
+    log_ratio = torch.log(torch.tensor(ratio))
+    for _ in range(10):
+        target_area = area * torch.empty(1).uniform_(scale[0], scale[1]).item()
+        aspect_ratio = torch.exp(torch.empty(1).uniform_(log_ratio[0], log_ratio[1])).item()
+
+        w = int(round(math.sqrt(target_area * aspect_ratio)))
+        h = int(round(math.sqrt(target_area / aspect_ratio)))
+
+        if 0 < w <= width and 0 < h <= height:
+            i = torch.randint(0, height - h + 1, size=(1,)).item()
+            j = torch.randint(0, width - w + 1, size=(1,)).item()
+            return i, j, h, w
+
+    # Fallback maximum patch
+    scale_sqrt = int(math.sqrt(scale[1]))
+    h = scale_sqrt * height
+    w = scale_sqrt * width
+    i = (height - h) // 2
+    j = (width - w) // 2
+    return i, j, h, w
 
 
 def get_args_parser():
     p = argparse.ArgumentParser("SimSiam", description='PyTorch ImageNet Training', add_help=False)
     p.add_argument('-a', '--arch', default='resnet18')
     p.add_argument('--epochs', default=100, type=int, help='number of total epochs to run')
+    # p.add_argument('--num_crops', type=int, default=2, help="Number of crops.")
     p.add_argument('-b', '--batch_size', default=256, type=int,
                    help='mini-batch size (default: 256), this is the total '
                         'batch size of all GPUs on the current node when')
@@ -188,7 +273,12 @@ def get_args_parser():
     p.add_argument('--momentum', default=0.9, type=float, help='momentum of SGD solver')
     p.add_argument('--wd', '--weight_decay', default=1e-4, type=float, help='weight decay (default: 1e-4)',
                    dest="weight_decay")
-    p.add_argument('--fp16', default=False, type=utils.bool_flag, help="Whether or not to use half precision for training.")
+    p.add_argument('--fp16', default=True, type=utils.bool_flag,
+                   help="Whether or not to use half precision for training.")
+    p.add_argument('--rc_base', type=float, default=0)
+    p.add_argument('--rc_fnl', type=float, default=0)
+    p.add_argument('--rc_wue', type=int, default=0)
+    p.add_argument('--rc_wuv', type=float, default=0)
 
     # simsiam specific configs:
     p.add_argument('--dim', default=2048, type=int,
