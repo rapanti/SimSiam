@@ -20,10 +20,10 @@ import torch.utils.data
 import torch.utils.data.distributed
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
-# import torchvision.models as models
+import torchvision.models as models
 from torch.utils.tensorboard import SummaryWriter
 
-import models
+# import models
 import utils
 
 model_names = sorted(name for name in models.__dict__
@@ -305,7 +305,7 @@ def get_args_parser():
     parser = argparse.ArgumentParser(description='PyTorch ImageNet Training', add_help=False)
     parser.add_argument('--dataset', help='Specify dataset.')
     parser.add_argument('--data_path', help='path to dataset')
-    parser.add_argument('--arch', default='resnet18')
+    parser.add_argument('--arch', default='resnet50')
     parser.add_argument('--num_workers', default=8, type=int, help='number of data loading workers (default: 32)')
     parser.add_argument('--epochs', default=100, type=int, help='number of total epochs to run')
 
