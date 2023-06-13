@@ -33,7 +33,6 @@ model_names = sorted(name for name in models.__dict__
 
 def main(args):
     utils.init_distributed_mode(args) if not utils.is_dist_avail_and_initialized() else None
-    print(utils.is_dist_avail_and_initialized())
     utils.fix_random_seeds(args.seed)
     cudnn.benchmark = True
 
