@@ -22,11 +22,11 @@ import torch.utils.data
 import torch.utils.data.distributed
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
-# import torchvision.models as models
+import torchvision.models as models
 from torch.utils.data import DistributedSampler, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
-import models
+# import models
 import builder
 import utils
 
@@ -81,10 +81,10 @@ def main(args):
     start_epoch = to_restore["epoch"]
 
     # ============ preparing data ... ============
-    transform = TwoCropsTransform()
-
     args.batch_size_per_gpu = args.batch_size // utils.get_world_size()
-    dataset = datasets.CIFAR10(args.data_path, True, transform)
+    train_dir = Path(args.data_path).joinpath("train")
+    transform = TwoCropsTransform(args.num_views)
+    dataset = datasets.ImageFolder(train_dir, transform)
     sampler = DistributedSampler(dataset)
     loader = DataLoader(
         dataset,
@@ -95,13 +95,6 @@ def main(args):
         drop_last=True,
     )
 
-    rc_schedule = utils.cosine_scheduler(
-        base_value=args.rc_base,
-        final_value=args.rc_fnl,
-        epochs=args.epochs,
-        niter_per_ep=len(loader),
-    )
-
     log_dir = os.path.join(args.output_dir, "summary")
     board = SummaryWriter(log_dir) if utils.is_main_process() else None
 
@@ -109,7 +102,7 @@ def main(args):
         loader.sampler.set_epoch(epoch)
         adjust_learning_rate(optimizer, init_lr, epoch, args)
 
-        train(loader, model, criterion, optimizer, epoch, rc_schedule, args, fp16, board)
+        train(loader, model, criterion, optimizer, epoch, args, fp16, board)
 
         save_dict = {
             'model': model.state_dict(),
@@ -123,26 +116,16 @@ def main(args):
             utils.save_on_master(save_dict, os.path.join(args.output_dir, f'checkpoint{epoch:04}.pth'))
 
 
-def train(loader, model, criterion, optimizer, epoch, rc_schedule, args, fp16, board,):
+def train(loader, model, criterion, optimizer, epoch, args, fp16, board,):
     model.train()
     metric_logger = utils.MetricLogger(delimiter=" ")
     header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
     for it, (images, _) in enumerate(metric_logger.log_every(loader, 10, header)):
         it = len(loader) * epoch + it  # global training iteration
-        rc_prob = rc_schedule[it]
 
         images = [im.cuda(non_blocking=True) for im in images]
-        x1, x2, y0 = images
-        b, h, w, c = x1.shape
-
-        y0 = select_patches(x1, y0, model)
-
-        if rc_prob > 0:
-            random_values = torch.rand(b, device=x1.device)
-            use_random = random_values < rc_prob
-            x2 = torch.where(use_random[:, None, None, None], x2, y0)
-        else:
-            x2 = y0
+        x1 = images[0]
+        x2 = select_views(images, model)
 
         with torch.cuda.amp.autocast(fp16 is not None):
             p1, p2, z1, z2 = model(x1=x1, x2=x2)
@@ -181,21 +164,41 @@ def adjust_learning_rate(optimizer, init_lr, epoch, args):
 class TwoCropsTransform:
     """Take two random crops of one image as the query and key."""
 
-    def __init__(self):
-        rrc = [transforms.RandomResizedCrop(32, (0.2, 1))]
+    def __init__(self, num_views=2):
+        self.num_views = num_views
         augmentation = [
+            transforms.RandomResizedCrop(224, (0.2, 1)),
             transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
             transforms.RandomGrayscale(p=0.2),
-            transforms.RandomApply([transforms.GaussianBlur(3, (0.1, 2))], p=0.5),
+            transforms.RandomApply([transforms.GaussianBlur(9, (0.1, 2))], p=0.5),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
-            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+            transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
         ]
-        self.base_transform = transforms.Compose(rrc + augmentation)
-        self.color_transform = transforms.Compose(augmentation)
+        self.base_transform = transforms.Compose(augmentation)
 
     def __call__(self, x):
-        return [self.base_transform(x), self.base_transform(x), self.color_transform(x)]
+        return [self.base_transform(x) for _ in range(self.num_views)]
+
+
+@torch.no_grad()
+def select_views(images, model):
+    embeds = [model.module.get_proj(img) for img in images]
+    p1, z1 = embeds[0]
+    scores = [nnf.cosine_similarity(p1, z2) + nnf.cosine_similarity(p2, z1) for p2, z2 in embeds[1:]]
+    # out = images[1]
+    # run_score = scores[0]
+    # for n, score in enumerate(scores):
+    #     run_score, cond = torch.stack((run_score, score)).min(dim=0)
+    #     cond = cond.type(torch.bool)
+    #     out = torch.where(cond[:, None, None, None], out, images[n+1])
+    stacked = torch.stack(scores)
+    values, indic = stacked.min(dim=0)
+    a = nnf.one_hot(indic, len(scores)).T
+    out = torch.zeros_like(images[0])
+    for n, img in enumerate(images[1:]):
+        out += a[n].view(-1, 1, 1, 1) * img
+    return out
 
 
 @torch.no_grad()
@@ -205,12 +208,11 @@ def select_patches(x1, x2, model):
     target = model.module.get_proj(x1)
 
     _, _, h, w = get_params(x2, (0.2, 1))
-    unfolded = nnf.unfold(x2, (h, w), stride=4)
+    unfolded = nnf.unfold(x2, (h, w), stride=32)
     unfolded = einops.rearrange(unfolded, "b (c h w) n -> (b n) c h w", c=c, h=h, w=w)
-    samples = nnf.interpolate(unfolded, (32, 32), mode='bilinear', antialias=True)
+    samples = nnf.interpolate(unfolded, (224, 224), mode='bilinear', antialias=True)
     embeds = model.module.get_proj(samples)
     out = process_patches(target, samples, embeds)
-
     return out
 
 
@@ -263,22 +265,17 @@ def get_params(img, scale, ratio=(3.0 / 4.0, 4.0 / 3.0)):
 
 def get_args_parser():
     p = argparse.ArgumentParser("SimSiam", description='PyTorch ImageNet Training', add_help=False)
-    p.add_argument('-a', '--arch', default='resnet18')
+    p.add_argument('-a', '--arch', default='resnet50')
     p.add_argument('--epochs', default=100, type=int, help='number of total epochs to run')
-    # p.add_argument('--num_crops', type=int, default=2, help="Number of crops.")
     p.add_argument('-b', '--batch_size', default=256, type=int,
-                   help='mini-batch size (default: 256), this is the total '
-                        'batch size of all GPUs on the current node when')
+                   help='mini-batch size (default: 256), this is the total batch size of all GPU.')
+    p.add_argument('--num_views', default=16, type=int, help='Number of different views for one image.')
     p.add_argument('--lr', default=0.05, type=float, help='initial (base) learning rate')
     p.add_argument('--momentum', default=0.9, type=float, help='momentum of SGD solver')
     p.add_argument('--wd', '--weight_decay', default=1e-4, type=float, help='weight decay (default: 1e-4)',
                    dest="weight_decay")
     p.add_argument('--fp16', default=True, type=utils.bool_flag,
                    help="Whether or not to use half precision for training.")
-    p.add_argument('--rc_base', type=float, default=0)
-    p.add_argument('--rc_fnl', type=float, default=0)
-    p.add_argument('--rc_wue', type=int, default=0)
-    p.add_argument('--rc_wuv', type=float, default=0)
 
     # simsiam specific configs:
     p.add_argument('--dim', default=2048, type=int,
@@ -289,7 +286,7 @@ def get_args_parser():
                    help='Fix learning rate for the predictor')
 
     # Misc
-    p.add_argument('--dataset', default="CIFAR10", type=str)
+    p.add_argument('--dataset', default="ImageNet", type=str)
     p.add_argument('--data_path', type=str, help='path to training data.')
     p.add_argument('--output_dir', default=".", type=str, help='Path to save logs and checkpoints.')
     p.add_argument('--saveckp_freq', default=0, type=int, help='Save checkpoint every x epochs.')
