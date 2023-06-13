@@ -19,11 +19,11 @@ import torch.utils.data
 import torch.utils.data.distributed
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
-# import torchvision.models as models
+import torchvision.models as models
 from torch.utils.data import DistributedSampler, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
-import models
+# import models
 import builder
 import utils
 
@@ -78,20 +78,21 @@ def main(args):
     start_epoch = to_restore["epoch"]
 
     # ============ preparing data ... ============
-    normalize = transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])
+    normalize = transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     augmentation = [
-        transforms.RandomResizedCrop(32, scale=(0.2, 1.)),
+        transforms.RandomResizedCrop(224, scale=(0.2, 1.)),
         transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
         transforms.RandomGrayscale(p=0.2),
-        transforms.RandomApply([transforms.GaussianBlur(3, (0.1, 2))], p=0.5),
+        transforms.RandomApply([transforms.GaussianBlur(9, (0.1, 2))], p=0.5),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         normalize
     ]
     transform = TwoCropsTransform(transforms.Compose(augmentation))
 
+    train_dir = Path(args.data_path).joinpath("train")
     args.batch_size_per_gpu = args.batch_size // utils.get_world_size()
-    dataset = datasets.CIFAR10(args.data_path, True, transform)
+    dataset = datasets.ImageFolder(train_dir, transform)
     sampler = DistributedSampler(dataset)
     loader = DataLoader(
         dataset,
@@ -180,17 +181,18 @@ class TwoCropsTransform:
 
 
 def get_args_parser():
-    p = argparse.ArgumentParser("SimSiam", description='PyTorch ImageNet Training', add_help=False)
-    p.add_argument('-a', '--arch', default='resnet18')
+    p = argparse.ArgumentParser("SimSiam", description='SimSiam PyTorch ImageNet Training', add_help=False)
+    p.add_argument('-a', '--arch', default='resnet50')
     p.add_argument('--epochs', default=100, type=int, help='number of total epochs to run')
-    p.add_argument('-b', '--batch_size', default=256, type=int,
-                   help='mini-batch size (default: 256), this is the total '
+    p.add_argument('-b', '--batch_size', default=512, type=int,
+                   help='mini-batch size (default: 512), this is the total '
                         'batch size of all GPUs on the current node when')
     p.add_argument('--lr', default=0.05, type=float, help='initial (base) learning rate')
     p.add_argument('--momentum', default=0.9, type=float, help='momentum of SGD solver')
     p.add_argument('--wd', '--weight_decay', default=1e-4, type=float, help='weight decay (default: 1e-4)',
                    dest="weight_decay")
-    p.add_argument('--fp16', default=False, type=utils.bool_flag, help="Whether or not to use half precision for training.")
+    p.add_argument('--fp16', default=True, type=utils.bool_flag,
+                   help="Whether or not to use half precision for training.")
 
     # simsiam specific configs:
     p.add_argument('--dim', default=2048, type=int,
@@ -201,7 +203,7 @@ def get_args_parser():
                    help='Fix learning rate for the predictor')
 
     # Misc
-    p.add_argument('--dataset', default="CIFAR10", type=str)
+    p.add_argument('--dataset', default="ImageNet", type=str)
     p.add_argument('--data_path', type=str, help='path to training data.')
     p.add_argument('--output_dir', default=".", type=str, help='Path to save logs and checkpoints.')
     p.add_argument('--saveckp_freq', default=0, type=int, help='Save checkpoint every x epochs.')
