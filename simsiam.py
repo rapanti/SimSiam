@@ -190,7 +190,7 @@ def get_args_parser():
     p.add_argument('--momentum', default=0.9, type=float, help='momentum of SGD solver')
     p.add_argument('--wd', '--weight_decay', default=1e-4, type=float, help='weight decay (default: 1e-4)',
                    dest="weight_decay")
-    p.add_argument('--fp16', default=False, type=utils.bool_flag, help="Whether or not to use half precision for training.")
+    p.add_argument('--fp16', default=True, type=utils.bool_flag, help="Whether or not to use half precision for training.")
 
     # simsiam specific configs:
     p.add_argument('--dim', default=2048, type=int,
