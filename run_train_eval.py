@@ -15,20 +15,21 @@ if __name__ == "__main__":
     if 'pretrain' in args.pipeline_mode:
         print('STARTING PRETRAINING')
         simsiam.main(args)
-        time.sleep(10)
         print('FINISHED PRETRAINING')
+
+    time.sleep(10)
 
     if 'eval' in args.pipeline_mode:
         # change linear specific parameters
-        args.epochs = 300
-        args.lr = 0.01
+        args.epochs = 90
+        args.lr = 0.1
         args.momentum = 0.9
         args.weight_decay = 0
-        args.batch_size = 512
+        args.batch_size = 4096
+        args.lars = True
         args.pretrained = f"{args.output_dir}/checkpoint.pth"
         args.ckp_key = "model"
         args.val_freq = 1
-        args.img_size = 32
         print('STARTING EVALUATION')
         eval_linear.main(args)
         print('FINISHED EVALUATION')
