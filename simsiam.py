@@ -1,9 +1,3 @@
-#!/usr/bin/env python
-# Copyright (c) Facebook, Inc. and its affiliates.
-# All rights reserved.
-
-# This source code is licensed under the license found in the
-# LICENSE file in the root directory of this source tree.
 import argparse
 import json
 import math
@@ -81,7 +75,7 @@ def main(args):
     start_epoch = to_restore["epoch"]
 
     # ============ preparing data ... ============
-    transform = TwoCropsTransform()
+    transform = TwoCropsTransform(args.num_crops)
 
     args.batch_size_per_gpu = args.batch_size // utils.get_world_size()
     dataset = datasets.CIFAR10(args.data_path, True, transform)
@@ -102,6 +96,8 @@ def main(args):
         niter_per_ep=len(loader),
     )
 
+    select_views = select_names[args.select_fn]
+
     log_dir = os.path.join(args.output_dir, "summary")
     board = SummaryWriter(log_dir) if utils.is_main_process() else None
 
@@ -109,7 +105,7 @@ def main(args):
         loader.sampler.set_epoch(epoch)
         adjust_learning_rate(optimizer, init_lr, epoch, args)
 
-        train(loader, model, criterion, optimizer, epoch, rc_schedule, args, fp16, board)
+        train(loader, model, criterion, optimizer, epoch, rc_schedule, args, fp16, board, select_views)
 
         save_dict = {
             'model': model.state_dict(),
@@ -123,7 +119,7 @@ def main(args):
             utils.save_on_master(save_dict, os.path.join(args.output_dir, f'checkpoint{epoch:04}.pth'))
 
 
-def train(loader, model, criterion, optimizer, epoch, rc_schedule, args, fp16, board,):
+def train(loader, model, criterion, optimizer, epoch, rc_schedule, args, fp16, board, select_views):
     model.train()
     metric_logger = utils.MetricLogger(delimiter=" ")
     header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
@@ -132,17 +128,19 @@ def train(loader, model, criterion, optimizer, epoch, rc_schedule, args, fp16, b
         rc_prob = rc_schedule[it]
 
         images = [im.cuda(non_blocking=True) for im in images]
-        x1, x2, y0 = images
-        b, h, w, c = x1.shape
+        # x1, x2, y0 = images
+        # b, h, w, c = x1.shape
 
-        y0 = select_patches(x1, y0, model)
+        x1, x2 = select_views(images, model)
 
-        if rc_prob > 0:
-            random_values = torch.rand(b, device=x1.device)
-            use_random = random_values < rc_prob
-            x2 = torch.where(use_random[:, None, None, None], x2, y0)
-        else:
-            x2 = y0
+        # y0 = select_patches(x1, y0, model)
+        #
+        # if rc_prob > 0:
+        #     random_values = torch.rand(b, device=x1.device)
+        #     use_random = random_values < rc_prob
+        #     x2 = torch.where(use_random[:, None, None, None], x2, y0)
+        # else:
+        #     x2 = y0
 
         with torch.cuda.amp.autocast(fp16 is not None):
             p1, p2, z1, z2 = model(x1=x1, x2=x2)
@@ -181,7 +179,8 @@ def adjust_learning_rate(optimizer, init_lr, epoch, args):
 class TwoCropsTransform:
     """Take two random crops of one image as the query and key."""
 
-    def __init__(self):
+    def __init__(self, num_crops=2):
+        self.num_crops = num_crops
         rrc = [transforms.RandomResizedCrop(32, (0.2, 1))]
         augmentation = [
             transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
@@ -195,9 +194,78 @@ class TwoCropsTransform:
         self.color_transform = transforms.Compose(augmentation)
 
     def __call__(self, x):
-        return [self.base_transform(x), self.base_transform(x), self.color_transform(x)]
+        # return [self.base_transform(x), self.base_transform(x), self.color_transform(x)]
+        return [self.base_transform(x) for _ in range(self.num_crops)]
 
 
+@torch.no_grad()
+def select_views_cross(images, model):
+    b, c, h, w = images[0].shape
+    device = images[0].device
+    embeds = [model.module.get_proj(img) for img in images]
+    out1 = torch.zeros_like(images[0])
+    out2 = torch.zeros_like(images[0])
+    score = torch.full([b], torch.inf, device=device)
+    for n, x in enumerate(embeds):
+        p1, z1 = embeds[n]
+        for m in range(n + 1, len(embeds)):
+            p2, z2 = embeds[m]
+            sim = nnf.cosine_similarity(p1, z2) + nnf.cosine_similarity(p2, z1)
+            score, indices = torch.stack((score, sim)).min(dim=0)
+            indices = indices.type(torch.bool)
+            out1 = torch.where(indices[:, None, None, None], images[n], out1)
+            out2 = torch.where(indices[:, None, None, None], images[m], out2)
+    return out1, out2
+
+
+@torch.no_grad()
+def select_views_activations(images, model):
+    b, c, h, w = images[0].shape
+    device = images[0].device
+    embeds = [model.module.encoder.first_layer_activations(img).flatten(start_dim=1) for img in images]
+    out1 = torch.zeros_like(images[0])
+    out2 = torch.zeros_like(images[0])
+    score = torch.full([b], torch.inf, device=device)
+    for n, x in enumerate(embeds):
+        a1 = embeds[n]
+        for m in range(n + 1, len(embeds)):
+            a2 = embeds[m]
+            sim = nnf.cosine_similarity(a1, a2)
+            score, indices = torch.stack((score, sim)).min(dim=0)
+            indices = indices.type(torch.bool)
+            out1 = torch.where(indices[:, None, None, None], images[n], out1)
+            out2 = torch.where(indices[:, None, None, None], images[m], out2)
+    return out1, out2
+
+
+@torch.no_grad()
+def select_views_anchor(images, model):
+    embeds = [model.module.get_proj(img) for img in images]
+    p1, z1 = embeds[0]
+    scores = [nnf.cosine_similarity(p1, z2) + nnf.cosine_similarity(p2, z1) for p2, z2 in embeds[1:]]
+    # out = images[1]
+    # run_score = scores[0]
+    # for n, score in enumerate(scores):
+    #     run_score, cond = torch.stack((run_score, score)).min(dim=0)
+    #     cond = cond.type(torch.bool)
+    #     out = torch.where(cond[:, None, None, None], out, images[n+1])
+    stacked = torch.stack(scores)
+    values, indic = stacked.min(dim=0)
+    a = nnf.one_hot(indic, len(scores)).T
+    out = torch.zeros_like(images[0])
+    for n, img in enumerate(images[1:]):
+        out += a[n].view(-1, 1, 1, 1) * img
+    return images[0], out
+
+
+select_names = {
+    "anchor": select_views_anchor,
+    "cross": select_views_cross,
+    "activations": select_views_activations,
+}
+
+
+# Select-Patches with unfold operation
 @torch.no_grad()
 def select_patches(x1, x2, model):
     b, c, height, width = x1.shape
@@ -265,7 +333,8 @@ def get_args_parser():
     p = argparse.ArgumentParser("SimSiam", description='PyTorch ImageNet Training', add_help=False)
     p.add_argument('-a', '--arch', default='resnet18')
     p.add_argument('--epochs', default=100, type=int, help='number of total epochs to run')
-    # p.add_argument('--num_crops', type=int, default=2, help="Number of crops.")
+    p.add_argument('--num_crops', type=int, default=4, help="Number of crops.")
+    p.add_argument('--select_fn', type=str, default="cross", choices=["anchor", "cross", "activations"])
     p.add_argument('-b', '--batch_size', default=256, type=int,
                    help='mini-batch size (default: 256), this is the total '
                         'batch size of all GPUs on the current node when')

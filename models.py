@@ -114,6 +114,12 @@ class ResNet(nn.Module):
         out = self.fc(out)
         return out
 
+    def first_layer_activations(self, x):
+        out = nnf.relu(self.bn1(self.conv1(x)))
+        out = self.layer1(out)
+        out = self.layer2(out)
+        return out
+
 
 def resnet18(**args):
     return ResNet(BasicBlock, [2, 2, 2, 2], **args)
