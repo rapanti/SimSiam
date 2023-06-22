@@ -117,8 +117,29 @@ class ResNet(nn.Module):
     def first_layer_activations(self, x):
         out = nnf.relu(self.bn1(self.conv1(x)))
         out = self.layer1(out)
-        out = self.layer2(out)
         return out
+
+    def avgpool_activations(self, x):
+        out = nnf.relu(self.bn1(self.conv1(x)))
+        out = self.layer1(out)
+        out = self.layer2(out)
+        out = self.layer3(out)
+        out = self.layer4(out)
+        out = nnf.avg_pool2d(out, 4)
+        return out
+
+    def first_linear_activations(self, x):
+        out = nnf.relu(self.bn1(self.conv1(x)))
+        out = self.layer1(out)
+        out = self.layer2(out)
+        out = self.layer3(out)
+        out = self.layer4(out)
+        out = nnf.avg_pool2d(out, 4)
+        out = out.view(out.size(0), -1)
+        out = self.fc[1](self.fc[0](out))
+        return out
+
+
 
 
 def resnet18(**args):
