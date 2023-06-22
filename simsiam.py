@@ -44,6 +44,8 @@ def main(args):
         args.dim, args.pred_dim
     ).cuda()
 
+    # summary(model, [(3, 224, 224), (3, 224, 224)])
+
     if utils.has_batchnorms(model):
         model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
     model = nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
@@ -131,7 +133,7 @@ def train(loader, model, criterion, optimizer, epoch, rc_schedule, args, fp16, b
         # x1, x2, y0 = images
         # b, h, w, c = x1.shape
 
-        x1, x2 = select_views(images, model)
+        x1, x2 = select_views(images, model, fp16)
 
         # y0 = select_patches(x1, y0, model)
         #
@@ -199,30 +201,99 @@ class TwoCropsTransform:
 
 
 @torch.no_grad()
-def select_views_cross(images, model):
+def select_views_cross(images, model, fp16):
     b, c, h, w = images[0].shape
     device = images[0].device
-    embeds = [model.module.get_proj(img) for img in images]
+
+    with torch.cuda.amp.autocast(fp16 is not None):
+        model_out = model.module.get_proj(torch.cat(images, dim=0))
+    p1s, z1s = model_out[0].chunk(len(images)), model_out[1].chunk(len(images))
+
     out1 = torch.zeros_like(images[0])
     out2 = torch.zeros_like(images[0])
     score = torch.full([b], torch.inf, device=device)
-    for n, x in enumerate(embeds):
-        p1, z1 = embeds[n]
-        for m in range(n + 1, len(embeds)):
-            p2, z2 = embeds[m]
-            sim = nnf.cosine_similarity(p1, z2) + nnf.cosine_similarity(p2, z1)
-            score, indices = torch.stack((score, sim)).min(dim=0)
-            indices = indices.type(torch.bool)
+
+    for n in range(len(images)):
+        p1, z1 = p1s[n], z1s[n]
+        for m in range(n + 1, len(images)):
+            p2, z2 = p1s[m], z1s[m]
+
+            with torch.cuda.amp.autocast(fp16 is not None):
+                sim = nnf.cosine_similarity(p1, z2) + nnf.cosine_similarity(p2, z1)
+                score, indices = torch.stack((score, sim)).min(dim=0)
+                indices = indices.type(torch.bool)
+
             out1 = torch.where(indices[:, None, None, None], images[n], out1)
             out2 = torch.where(indices[:, None, None, None], images[m], out2)
+
     return out1, out2
 
 
 @torch.no_grad()
-def select_views_activations(images, model):
+def select_views_avgpool(images, model, fp16):
     b, c, h, w = images[0].shape
     device = images[0].device
-    embeds = [model.module.encoder.first_layer_activations(img).flatten(start_dim=1) for img in images]
+
+    with torch.cuda.amp.autocast(fp16 is not None):
+        model_out = model.module.encoder.avgpool_activations(torch.cat(images, dim=0))
+    embeds = model_out.chunk(len(images))
+
+    out1 = torch.zeros_like(images[0])
+    out2 = torch.zeros_like(images[0])
+    score = torch.full([b], torch.inf, device=device)
+
+    for n, x in enumerate(embeds):
+        e1 = embeds[n]
+        for m in range(n + 1, len(embeds)):
+            e2 = embeds[m]
+
+            with torch.cuda.amp.autocast(fp16 is not None):
+                sim = nnf.cosine_similarity(e1, e2)
+                score, indices = torch.stack((score, sim)).min(dim=0)
+                indices = indices.type(torch.bool)
+
+            out1 = torch.where(indices[:, None, None, None], images[n], out1)
+            out2 = torch.where(indices[:, None, None, None], images[m], out2)
+
+    return out1, out2
+
+
+@torch.no_grad()
+def select_views_linear(images, model, fp16):
+    b, c, h, w = images[0].shape
+    device = images[0].device
+
+    with torch.cuda.amp.autocast(fp16 is not None):
+        model_out = model.module.encoder.first_linear_activations(torch.cat(images, dim=0))
+    embeds = model_out.chunk(len(images))
+
+    out1 = torch.zeros_like(images[0])
+    out2 = torch.zeros_like(images[0])
+    score = torch.full([b], torch.inf, device=device)
+
+    for n, x in enumerate(embeds):
+        e1 = embeds[n]
+        for m in range(n + 1, len(embeds)):
+            e2 = embeds[m]
+
+            with torch.cuda.amp.autocast(fp16 is not None):
+                sim = nnf.cosine_similarity(e1, e2)
+                score, indices = torch.stack((score, sim)).min(dim=0)
+                indices = indices.type(torch.bool)
+
+            out1 = torch.where(indices[:, None, None, None], images[n], out1)
+            out2 = torch.where(indices[:, None, None, None], images[m], out2)
+
+    return out1, out2
+
+
+@torch.no_grad()
+def select_views_first_layer(images, model, fp16):
+    b, c, h, w = images[0].shape
+    device = images[0].device
+
+    with torch.cuda.amp.autocast(fp16 is not None):
+        embeds = [model.module.encoder.first_layer_activations(img).view(b, -1) for img in images]
     out1 = torch.zeros_like(images[0])
     out2 = torch.zeros_like(images[0])
     score = torch.full([b], torch.inf, device=device)
@@ -239,7 +310,7 @@ def select_views_activations(images, model):
 
 
 @torch.no_grad()
-def select_views_anchor(images, model):
+def select_views_anchor(images, model, fp16):
     embeds = [model.module.get_proj(img) for img in images]
     p1, z1 = embeds[0]
     scores = [nnf.cosine_similarity(p1, z2) + nnf.cosine_similarity(p2, z1) for p2, z2 in embeds[1:]]
@@ -261,8 +332,33 @@ def select_views_anchor(images, model):
 select_names = {
     "anchor": select_views_anchor,
     "cross": select_views_cross,
-    "activations": select_views_activations,
+    "firstlayer": select_views_first_layer,
+    "avgpool": select_views_avgpool,
+    "linear": select_views_linear,
 }
+
+
+@torch.no_grad()
+def select_views_cross_(images, model, fp16):
+    b, c, h, w = images[0].shape
+    device = images[0].device
+
+    with torch.cuda.amp.autocast(fp16 is not None):
+        embeds = [model.module.get_proj(img) for img in images]
+
+    out1 = torch.zeros_like(images[0])
+    out2 = torch.zeros_like(images[0])
+    score = torch.full([b], torch.inf, device=device)
+    for n, x in enumerate(embeds):
+        p1, z1 = embeds[n]
+        for m in range(n + 1, len(embeds)):
+            p2, z2 = embeds[m]
+            sim = nnf.cosine_similarity(p1, z2) + nnf.cosine_similarity(p2, z1)
+            score, indices = torch.stack((score, sim)).min(dim=0)
+            indices = indices.type(torch.bool)
+            out1 = torch.where(indices[:, None, None, None], images[n], out1)
+            out2 = torch.where(indices[:, None, None, None], images[m], out2)
+    return out1, out2
 
 
 # Select-Patches with unfold operation
