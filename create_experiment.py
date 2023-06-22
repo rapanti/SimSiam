@@ -14,7 +14,7 @@ if __name__ == "__main__":
     slurm_parser.add_argument("--array", default=0, type=int)
     slurm_parser.add_argument("-t", "--time", default="23:59:59", type=str)
     slurm_parser.add_argument("--prefix", default="simsiam-argmin_sim", type=str)
-    slurm_parser.add_argument("--suffix", default="default", type=str)
+    slurm_parser.add_argument("--suffix", default="select_fn_cross-ncrops_4", type=str)
     slurm_args, _ = slurm_parser.parse_known_args()
 
     exp_dir = "/work/dlclarge2/rapanti-metassl-dino-stn/experiments"

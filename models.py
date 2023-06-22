@@ -139,8 +139,6 @@ class ResNet(nn.Module):
         return out
 
 
-
-
 def resnet18(**args):
     return ResNet(BasicBlock, [2, 2, 2, 2], **args)
 

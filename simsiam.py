@@ -431,12 +431,12 @@ def get_args_parser():
     p.add_argument('--epochs', default=100, type=int, help='number of total epochs to run')
     p.add_argument('--num_crops', type=int, default=4, help="Number of crops.")
     p.add_argument('--select_fn', type=str, default="cross", choices=["anchor", "cross", "activations"])
-    p.add_argument('-b', '--batch_size', default=256, type=int,
-                   help='mini-batch size (default: 256), this is the total '
+    p.add_argument('-b', '--batch_size', default=512, type=int,
+                   help='mini-batch size (default: 512), this is the total '
                         'batch size of all GPUs on the current node when')
     p.add_argument('--lr', default=0.05, type=float, help='initial (base) learning rate')
     p.add_argument('--momentum', default=0.9, type=float, help='momentum of SGD solver')
-    p.add_argument('--wd', '--weight_decay', default=1e-4, type=float, help='weight decay (default: 1e-4)',
+    p.add_argument('--wd', '--weight_decay', default=5e-4, type=float, help='weight decay (default: 5e-4)',
                    dest="weight_decay")
     p.add_argument('--fp16', default=True, type=utils.bool_flag,
                    help="Whether or not to use half precision for training.")
