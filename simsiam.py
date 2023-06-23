@@ -91,13 +91,6 @@ def main(args):
         drop_last=True,
     )
 
-    rc_schedule = utils.cosine_scheduler(
-        base_value=args.rc_base,
-        final_value=args.rc_fnl,
-        epochs=args.epochs,
-        niter_per_ep=len(loader),
-    )
-
     select_views = select_names[args.select_fn]
 
     log_dir = os.path.join(args.output_dir, "summary")
@@ -107,7 +100,7 @@ def main(args):
         loader.sampler.set_epoch(epoch)
         adjust_learning_rate(optimizer, init_lr, epoch, args)
 
-        train(loader, model, criterion, optimizer, epoch, rc_schedule, args, fp16, board, select_views)
+        train(loader, model, criterion, optimizer, epoch, args, fp16, board, select_views)
 
         save_dict = {
             'model': model.state_dict(),
@@ -121,13 +114,12 @@ def main(args):
             utils.save_on_master(save_dict, os.path.join(args.output_dir, f'checkpoint{epoch:04}.pth'))
 
 
-def train(loader, model, criterion, optimizer, epoch, rc_schedule, args, fp16, board, select_views):
+def train(loader, model, criterion, optimizer, epoch, args, fp16, board, select_views):
     model.train()
     metric_logger = utils.MetricLogger(delimiter=" ")
     header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
     for it, (images, _) in enumerate(metric_logger.log_every(loader, 10, header)):
         it = len(loader) * epoch + it  # global training iteration
-        rc_prob = rc_schedule[it]
 
         images = [im.cuda(non_blocking=True) for im in images]
         # x1, x2, y0 = images
@@ -187,7 +179,8 @@ class TwoCropsTransform:
         augmentation = [
             transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
             transforms.RandomGrayscale(p=0.2),
-            transforms.RandomApply([transforms.GaussianBlur(3, (0.1, 2))], p=0.5),
+            # do not use blur for blur
+            # transforms.RandomApply([transforms.GaussianBlur(3, (0.1, 2))], p=0.5),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
             transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
@@ -235,7 +228,7 @@ def select_views_avgpool(images, model, fp16):
     device = images[0].device
 
     with torch.cuda.amp.autocast(fp16 is not None):
-        model_out = model.module.encoder.avgpool_activations(torch.cat(images, dim=0)).squeeze()
+        model_out = model.module.encoder.avgpool_activations(torch.cat(images, dim=0))
     embeds = model_out.chunk(len(images))
 
     out1 = torch.zeros_like(images[0])
@@ -314,12 +307,6 @@ def select_views_anchor(images, model, fp16):
     embeds = [model.module.get_proj(img) for img in images]
     p1, z1 = embeds[0]
     scores = [nnf.cosine_similarity(p1, z2) + nnf.cosine_similarity(p2, z1) for p2, z2 in embeds[1:]]
-    # out = images[1]
-    # run_score = scores[0]
-    # for n, score in enumerate(scores):
-    #     run_score, cond = torch.stack((run_score, score)).min(dim=0)
-    #     cond = cond.type(torch.bool)
-    #     out = torch.where(cond[:, None, None, None], out, images[n+1])
     stacked = torch.stack(scores)
     values, indic = stacked.min(dim=0)
     a = nnf.one_hot(indic, len(scores)).T
@@ -430,20 +417,16 @@ def get_args_parser():
     p.add_argument('-a', '--arch', default='resnet18')
     p.add_argument('--epochs', default=100, type=int, help='number of total epochs to run')
     p.add_argument('--num_crops', type=int, default=4, help="Number of crops.")
-    p.add_argument('--select_fn', type=str, default="linear", choices=select_names)
+    p.add_argument('--select_fn', type=str, default="cross", choices=select_names)
     p.add_argument('-b', '--batch_size', default=512, type=int,
                    help='mini-batch size (default: 512), this is the total '
                         'batch size of all GPUs on the current node when')
-    p.add_argument('--lr', default=0.05, type=float, help='initial (base) learning rate')
+    p.add_argument('--lr', default=0.03, type=float, help='initial (base) learning rate')
     p.add_argument('--momentum', default=0.9, type=float, help='momentum of SGD solver')
-    p.add_argument('--wd', '--weight_decay', default=1e-4, type=float, help='weight decay (default: 1e-4)',
+    p.add_argument('--wd', '--weight_decay', default=5e-4, type=float, help='weight decay (default: 1e-4)',
                    dest="weight_decay")
     p.add_argument('--fp16', default=True, type=utils.bool_flag,
                    help="Whether or not to use half precision for training.")
-    p.add_argument('--rc_base', type=float, default=0)
-    p.add_argument('--rc_fnl', type=float, default=0)
-    p.add_argument('--rc_wue', type=int, default=0)
-    p.add_argument('--rc_wuv', type=float, default=0)
 
     # simsiam specific configs:
     p.add_argument('--dim', default=2048, type=int,

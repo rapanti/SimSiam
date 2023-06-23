@@ -1,9 +1,3 @@
-#!/usr/bin/env python
-# Copyright (c) Facebook, Inc. and its affiliates.
-# All rights reserved.
-
-# This source code is licensed under the license found in the
-# LICENSE file in the root directory of this source tree.
 import argparse
 import json
 import math
@@ -261,14 +255,13 @@ def build_transform(is_train, args):
         ])
         if is_train:
             return transforms.Compose([
-                transforms.RandomResizedCrop(args.img_size),
+                transforms.RandomResizedCrop(32),
                 transforms.RandomHorizontalFlip(),
                 normalize,
             ])
-        factor = args.img_size // 32
         return transforms.Compose([
-            transforms.Resize(args.img_size + factor * 4),
-            transforms.CenterCrop(args.img_size),
+            transforms.Resize(36),
+            transforms.CenterCrop(32),
             normalize,
         ])
     if args.dataset == 'ImageNet':
@@ -308,11 +301,11 @@ def get_args_parser():
     parser.add_argument('--num_workers', default=8, type=int, help='number of data loading workers (default: 32)')
     parser.add_argument('--epochs', default=100, type=int, help='number of total epochs to run')
 
-    parser.add_argument('--batch-size', default=256, type=int,
-                        help='mini-batch size (default: 256), this is the total '
+    parser.add_argument('--batch-size', default=512, type=int,
+                        help='mini-batch size (default: 512), this is the total '
                              'batch size of all GPUs on the current node when '
                              'using Data Parallel or Distributed Data Parallel')
-    parser.add_argument('--lr', '--learning-rate', default=0.1, type=float,
+    parser.add_argument('--lr', '--learning-rate', default=30.0, type=float,
                         metavar='LR', help='initial (base) learning rate', dest='lr')
     parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
                         help='momentum')
@@ -331,7 +324,6 @@ def get_args_parser():
     parser.add_argument('--output_dir', default=".", type=str, help='Path to save logs and checkpoints.')
     parser.add_argument('--ckp_key', default="model", type=str, help='Key.')
     parser.add_argument("--dist_backend", default="nccl", type=str, help="Distributed backend.")
-    parser.add_argument("--img_size", default=32, type=int, help="Distributed backend.")
     parser.add_argument("--val_freq", default=1, type=int, help="Validate model every x epochs.")
 
     return parser

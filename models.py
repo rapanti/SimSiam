@@ -6,6 +6,7 @@
     https://arxiv.org/abs/1512.03385v1
 """
 import torch.nn as nn
+import torch.nn.functional
 import torch.nn.functional as nnf
 
 
@@ -126,6 +127,7 @@ class ResNet(nn.Module):
         out = self.layer3(out)
         out = self.layer4(out)
         out = nnf.avg_pool2d(out, 4)
+        out = out.view(out.size(0), -1)
         return out
 
     def first_linear_activations(self, x):

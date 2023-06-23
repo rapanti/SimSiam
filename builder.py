@@ -23,14 +23,11 @@ class SimSiam(nn.Module):
         self.encoder.fc = nn.Sequential(
             nn.Linear(prev_dim, prev_dim, bias=False),
             nn.BatchNorm1d(prev_dim),
-            nn.ReLU(inplace=True),  # first layer
-            nn.Linear(prev_dim, prev_dim, bias=False),
-            nn.BatchNorm1d(prev_dim),
-            nn.ReLU(inplace=True),  # second layer
+            nn.ReLU(inplace=True),
             self.encoder.fc,
             nn.BatchNorm1d(dim, affine=False)
         )  # output layer
-        self.encoder.fc[6].bias.requires_grad = False  # hack: not use bias as it is followed by BN
+        self.encoder.fc[3].bias.requires_grad = False  # hack: not use bias as it is followed by BN
 
         # build a 2-layer predictor
         self.predictor = nn.Sequential(

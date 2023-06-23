@@ -10,30 +10,27 @@ if __name__ == "__main__":
 
     slurm_parser = argparse.ArgumentParser("SlurmParser")
     slurm_parser.add_argument("--gpus", default=1, type=int)
-    slurm_parser.add_argument("-p", "--partition", default="mlhiwidlc_gpu-rtx2080-advanced", type=str)
+    slurm_parser.add_argument("--partition", default="mlhiwidlc_gpu-rtx2080-advanced", type=str)
     slurm_parser.add_argument("--array", default=0, type=int)
-    slurm_parser.add_argument("-t", "--time", default="23:59:59", type=str)
-    slurm_parser.add_argument("--prefix", default="simsiam-argmin_sim", type=str)
+    slurm_parser.add_argument("--time", default="23:59:59", type=str)
+    slurm_parser.add_argument("--prefix", default="simsiam-min_sim", type=str)
     slurm_parser.add_argument("--suffix", default="default", type=str)
+    slurm_parser.add_argument("--exp_dir", default=None, type=str)
     slurm_args, _ = slurm_parser.parse_known_args()
 
-    exp_dir = "/work/dlclarge2/rapanti-metassl-dino-stn/experiments"
-    prefix = slurm_args.prefix
-    suffix = slurm_args.suffix
-    seed = args.seed
-    arch = args.arch
-    epochs = args.epochs
-    bs = args.batch_size
-    dataset = args.dataset
-    match dataset:
-        case "CIFAR10":
-            args.data_path = "/work/dlclarge2/rapanti-metassl-dino-stn/datasets/CIFAR10"
-        case "ImageNet":
-            args.data_path = "/data/datasets/ImageNet/imagenet-pytorch"
-        case _:
-            args.data_path = "."
+    exp_dir = "/work/dlclarge2/rapanti-metassl-dino-stn/experiments" \
+        if slurm_args.exp_dir is None else slurm_args.exp_dir
 
-    exp_name = f"{prefix}-{arch}-{dataset}-ep_{epochs}-bs_{bs}-seed_{seed}-{suffix}"
+    if args.data_path is None:
+        if args.dataset == "CIFAR10":
+            args.data_path = "/work/dlclarge2/rapanti-metassl-dino-stn/datasets/CIFAR10"
+        elif args.dataset == "ImageNet":
+            args.data_path = "/data/datasets/ImageNet/imagenet-pytorch"
+        else:
+            raise ValueError(f"Dataset '{args.dataset}' has no default path. Specify path to dataset.")
+
+    exp_name = f"{slurm_args.prefix}-{args.arch}-{args.dataset}-ep{args.epochs}-bs{args.batch_size}" \
+               f"-lr{args.lr}-wd{args.weight_decay}-mom{args.momentum}-{slurm_args.suffix}-seed{args.seed}"
     args.output_dir = output_dir = Path(exp_dir).joinpath(exp_name)
     print(f"Experiment: {output_dir}")
 
@@ -44,7 +41,6 @@ if __name__ == "__main__":
     code_dir.mkdir(parents=True, exist_ok=True)
     copy_msg = subprocess.call(["cp", "-r", ".", code_dir])
 
-    # Slurm settings
     log_file = log_dir.joinpath("%A.%a.%N.out")
     sbatch = [
         "#!/bin/bash", f"#SBATCH -p {slurm_args.partition}",
