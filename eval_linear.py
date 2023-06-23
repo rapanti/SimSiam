@@ -17,7 +17,6 @@ import torchvision.datasets as datasets
 import torchvision.models as models
 from torch.utils.tensorboard import SummaryWriter
 
-# import models
 import utils
 
 model_names = sorted(name for name in models.__dict__

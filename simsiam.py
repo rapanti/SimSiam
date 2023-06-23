@@ -1,14 +1,7 @@
-#!/usr/bin/env python
-# Copyright (c) Facebook, Inc. and its affiliates.
-# All rights reserved.
-
-# This source code is licensed under the license found in the
-# LICENSE file in the root directory of this source tree.
 import argparse
 import json
 import math
 import os
-import random
 from pathlib import Path
 
 import einops
@@ -26,7 +19,6 @@ import torchvision.models as models
 from torch.utils.data import DistributedSampler, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
-# import models
 import builder
 import utils
 
@@ -83,7 +75,7 @@ def main(args):
     # ============ preparing data ... ============
     args.batch_size_per_gpu = args.batch_size // utils.get_world_size()
     train_dir = Path(args.data_path).joinpath("train")
-    transform = TwoCropsTransform(args.num_views)
+    transform = TwoCropsTransform(args.num_crops)
     dataset = datasets.ImageFolder(train_dir, transform)
     sampler = DistributedSampler(dataset)
     loader = DataLoader(
@@ -124,8 +116,7 @@ def train(loader, model, criterion, optimizer, epoch, args, fp16, board,):
         it = len(loader) * epoch + it  # global training iteration
 
         images = [im.cuda(non_blocking=True) for im in images]
-        x1 = images[0]
-        x2 = select_views(images, model)
+        x1, x2 = select_views(images, model, fp16)
 
         with torch.cuda.amp.autocast(fp16 is not None):
             p1, p2, z1, z2 = model(x1=x1, x2=x2)
@@ -164,8 +155,8 @@ def adjust_learning_rate(optimizer, init_lr, epoch, args):
 class TwoCropsTransform:
     """Take two random crops of one image as the query and key."""
 
-    def __init__(self, num_views=2):
-        self.num_views = num_views
+    def __init__(self, num_crops=2):
+        self.num_crops = num_crops
         augmentation = [
             transforms.RandomResizedCrop(224, (0.2, 1)),
             transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
@@ -178,98 +169,45 @@ class TwoCropsTransform:
         self.base_transform = transforms.Compose(augmentation)
 
     def __call__(self, x):
-        return [self.base_transform(x) for _ in range(self.num_views)]
+        return [self.base_transform(x) for _ in range(self.num_crops)]
 
 
 @torch.no_grad()
-def select_views(images, model):
-    embeds = [model.module.get_proj(img) for img in images]
-    p1, z1 = embeds[0]
-    scores = [nnf.cosine_similarity(p1, z2) + nnf.cosine_similarity(p2, z1) for p2, z2 in embeds[1:]]
-    # out = images[1]
-    # run_score = scores[0]
-    # for n, score in enumerate(scores):
-    #     run_score, cond = torch.stack((run_score, score)).min(dim=0)
-    #     cond = cond.type(torch.bool)
-    #     out = torch.where(cond[:, None, None, None], out, images[n+1])
-    stacked = torch.stack(scores)
-    values, indic = stacked.min(dim=0)
-    a = nnf.one_hot(indic, len(scores)).T
-    out = torch.zeros_like(images[0])
-    for n, img in enumerate(images[1:]):
-        out += a[n].view(-1, 1, 1, 1) * img
-    return out
+def select_views(images, model, fp16):
+    b, c, h, w = images[0].shape
+    device = images[0].device
 
+    with torch.cuda.amp.autocast(fp16 is not None):
+        model_out = model.module.get_proj(torch.cat(images, dim=0))
+    p1s, z1s = model_out[0].chunk(len(images)), model_out[1].chunk(len(images))
 
-@torch.no_grad()
-def select_patches(x1, x2, model):
-    b, c, height, width = x1.shape
+    out1 = torch.zeros_like(images[0])
+    out2 = torch.zeros_like(images[0])
+    score = torch.full([b], torch.inf, device=device)
 
-    target = model.module.get_proj(x1)
+    for n in range(len(images)):
+        p1, z1 = p1s[n], z1s[n]
+        for m in range(n + 1, len(images)):
+            p2, z2 = p1s[m], z1s[m]
 
-    _, _, h, w = get_params(x2, (0.2, 1))
-    unfolded = nnf.unfold(x2, (h, w), stride=32)
-    unfolded = einops.rearrange(unfolded, "b (c h w) n -> (b n) c h w", c=c, h=h, w=w)
-    samples = nnf.interpolate(unfolded, (224, 224), mode='bilinear', antialias=True)
-    embeds = model.module.get_proj(samples)
-    out = process_patches(target, samples, embeds)
-    return out
+            with torch.cuda.amp.autocast(fp16 is not None):
+                sim = nnf.cosine_similarity(p1, z2) + nnf.cosine_similarity(p2, z1)
+                score, indices = torch.stack((score, sim)).min(dim=0)
+                indices = indices.type(torch.bool)
 
+            out1 = torch.where(indices[:, None, None, None], images[n], out1)
+            out2 = torch.where(indices[:, None, None, None], images[m], out2)
 
-def process_patches(target, samples, embeds):
-    p1, z1 = target
-    p2, z2 = embeds
-
-    b = p1.size(0)
-    bs = samples.size(0)
-    n = bs // b
-    p1 = p1.repeat(1, n)
-    z1 = z1.repeat(1, n)
-    p1 = einops.rearrange(p1, "b (n d) -> (b n) d", n=n)
-    z1 = einops.rearrange(z1, "b (n d) -> (b n) d", n=n)
-
-    # loss = nnf.cosine_similarity(student_out, tmp, dim=-1)
-    loss = nnf.cosine_similarity(p1, z2) + nnf.cosine_similarity(p2, z1)
-    loss = einops.rearrange(loss, "(b n) -> b n", n=n)
-    indices = nnf.one_hot(loss.argmin(dim=-1), num_classes=n).type(samples.dtype)
-    samples = einops.rearrange(samples, "(b n) c h w -> b n c h w", n=n)
-    patches = torch.einsum("b n, b n c h w -> b c h w", indices, samples)
-    return patches
-
-
-def get_params(img, scale, ratio=(3.0 / 4.0, 4.0 / 3.0)):
-    batch, channels, height, width = img.shape
-    area = height * width
-
-    log_ratio = torch.log(torch.tensor(ratio))
-    for _ in range(10):
-        target_area = area * torch.empty(1).uniform_(scale[0], scale[1]).item()
-        aspect_ratio = torch.exp(torch.empty(1).uniform_(log_ratio[0], log_ratio[1])).item()
-
-        w = int(round(math.sqrt(target_area * aspect_ratio)))
-        h = int(round(math.sqrt(target_area / aspect_ratio)))
-
-        if 0 < w <= width and 0 < h <= height:
-            i = torch.randint(0, height - h + 1, size=(1,)).item()
-            j = torch.randint(0, width - w + 1, size=(1,)).item()
-            return i, j, h, w
-
-    # Fallback maximum patch
-    scale_sqrt = int(math.sqrt(scale[1]))
-    h = scale_sqrt * height
-    w = scale_sqrt * width
-    i = (height - h) // 2
-    j = (width - w) // 2
-    return i, j, h, w
+    return out1, out2
 
 
 def get_args_parser():
     p = argparse.ArgumentParser("SimSiam", description='PyTorch ImageNet Training', add_help=False)
     p.add_argument('-a', '--arch', default='resnet50')
     p.add_argument('--epochs', default=100, type=int, help='number of total epochs to run')
-    p.add_argument('-b', '--batch_size', default=256, type=int,
-                   help='mini-batch size (default: 256), this is the total batch size of all GPU.')
-    p.add_argument('--num_views', default=16, type=int, help='Number of different views for one image.')
+    p.add_argument('-b', '--batch_size', default=512, type=int,
+                   help='mini-batch size (default: 512), this is the total batch size of all GPU.')
+    p.add_argument('--num_crops', default=4, type=int, help='Number of different crops for one image.')
     p.add_argument('--lr', default=0.05, type=float, help='initial (base) learning rate')
     p.add_argument('--momentum', default=0.9, type=float, help='momentum of SGD solver')
     p.add_argument('--wd', '--weight_decay', default=1e-4, type=float, help='weight decay (default: 1e-4)',

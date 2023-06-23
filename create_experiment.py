@@ -13,8 +13,8 @@ if __name__ == "__main__":
     slurm_parser.add_argument("--partition", default="mlhiwidlc_gpu-rtx2080-advanced", type=str)
     slurm_parser.add_argument("--array", default=0, type=int)
     slurm_parser.add_argument("--time", default="23:59:59", type=str)
-    slurm_parser.add_argument("--prefix", default="simsiam-argmin_sim", type=str)
-    slurm_parser.add_argument("--suffix", default="baseline", type=str)
+    slurm_parser.add_argument("--prefix", default="simsiam-min_sim", type=str)
+    slurm_parser.add_argument("--suffix", default="default", type=str)
     slurm_parser.add_argument("--exp_dir", default=None, type=str)
     slurm_args, _ = slurm_parser.parse_known_args()
 
@@ -30,8 +30,8 @@ if __name__ == "__main__":
             raise ValueError(f"Dataset '{args.dataset}' has no default path. Specify path to dataset.")
 
     exp_name = f"{slurm_args.prefix}-{args.arch}-{args.dataset}-ep{args.epochs}-bs{args.batch_size}" \
-               f"-lr{args.lr}-wd{args.weight_decay}-mom{args.momentum}-nv{args.num_views}" \
-               f"-seed{args.seed}-{slurm_args.suffix}"
+               f"-lr{args.lr}-wd{args.weight_decay}-mom{args.momentum}-ncrops{args.num_crops}" \
+               f"-{slurm_args.suffix}-seed{args.seed}"
     args.output_dir = output_dir = Path(exp_dir).joinpath(exp_name)
     print(f"Experiment: {output_dir}")
 
