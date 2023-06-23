@@ -80,6 +80,7 @@ class ResNet(nn.Module):
         self.layer2 = self._make_layer(block, 128, num_blocks[1], stride=2)
         self.layer3 = self._make_layer(block, 256, num_blocks[2], stride=2)
         self.layer4 = self._make_layer(block, 512, num_blocks[3], stride=2)
+        self.avg_bn = nn.BatchNorm1d(512, affine=False)
         self.fc = nn.Linear(512 * block.expansion, num_classes)
 
         for m in self.modules():
@@ -128,6 +129,7 @@ class ResNet(nn.Module):
         out = self.layer4(out)
         out = nnf.avg_pool2d(out, 4)
         out = out.view(out.size(0), -1)
+        out = self.avg_bn(out)
         return out
 
     def first_linear_activations(self, x):

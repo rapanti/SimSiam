@@ -14,7 +14,7 @@ if __name__ == "__main__":
     slurm_parser.add_argument("--array", default=0, type=int)
     slurm_parser.add_argument("--time", default="23:59:59", type=str)
     slurm_parser.add_argument("--prefix", default="simsiam-min_sim", type=str)
-    slurm_parser.add_argument("--suffix", default="default", type=str)
+    slurm_parser.add_argument("--suffix", default="select_fn_avg-ncrops4", type=str)
     slurm_parser.add_argument("--exp_dir", default=None, type=str)
     slurm_args, _ = slurm_parser.parse_known_args()
 

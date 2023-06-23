@@ -417,7 +417,7 @@ def get_args_parser():
     p.add_argument('-a', '--arch', default='resnet18')
     p.add_argument('--epochs', default=100, type=int, help='number of total epochs to run')
     p.add_argument('--num_crops', type=int, default=4, help="Number of crops.")
-    p.add_argument('--select_fn', type=str, default="cross", choices=select_names)
+    p.add_argument('--select_fn', type=str, default="avgpool", choices=select_names)
     p.add_argument('-b', '--batch_size', default=512, type=int,
                    help='mini-batch size (default: 512), this is the total '
                         'batch size of all GPUs on the current node when')
