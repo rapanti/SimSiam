@@ -83,7 +83,8 @@ def main(args):
         transforms.RandomResizedCrop(32, scale=(0.2, 1.)),
         transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
         transforms.RandomGrayscale(p=0.2),
-        transforms.RandomApply([transforms.GaussianBlur(3, (0.1, 2))], p=0.5),
+        # do not use blur for CIFAR
+        # transforms.RandomApply([transforms.GaussianBlur(3, (0.1, 2))], p=0.5),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         normalize
@@ -182,7 +183,7 @@ class TwoCropsTransform:
 def get_args_parser():
     p = argparse.ArgumentParser("SimSiam", description='PyTorch ImageNet Training', add_help=False)
     p.add_argument('-a', '--arch', default='resnet18')
-    p.add_argument('--epochs', default=100, type=int, help='number of total epochs to run')
+    p.add_argument('--epochs', default=800, type=int, help='number of total epochs to run')
     p.add_argument('-b', '--batch_size', default=512, type=int,
                    help='mini-batch size (default: 512), this is the total '
                         'batch size of all GPUs on the current node when')

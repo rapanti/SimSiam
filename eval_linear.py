@@ -262,14 +262,13 @@ def build_transform(is_train, args):
         ])
         if is_train:
             return transforms.Compose([
-                transforms.RandomResizedCrop(args.img_size),
+                transforms.RandomResizedCrop(32),
                 transforms.RandomHorizontalFlip(),
                 normalize,
             ])
-        factor = args.img_size // 32
         return transforms.Compose([
-            transforms.Resize(args.img_size + factor * 4),
-            transforms.CenterCrop(args.img_size),
+            transforms.Resize(36),
+            transforms.CenterCrop(32),
             normalize,
         ])
     if args.dataset == 'ImageNet':
@@ -332,7 +331,6 @@ def get_args_parser():
     parser.add_argument('--output_dir', default=".", type=str, help='Path to save logs and checkpoints.')
     parser.add_argument('--ckp_key', default="model", type=str, help='Key.')
     parser.add_argument("--dist_backend", default="nccl", type=str, help="Distributed backend.")
-    parser.add_argument("--img_size", default=32, type=int, help="Distributed backend.")
     parser.add_argument("--val_freq", default=1, type=int, help="Validate model every x epochs.")
 
     return parser
