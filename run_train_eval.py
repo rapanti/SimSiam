@@ -21,10 +21,10 @@ if __name__ == "__main__":
     if 'eval' in args.pipeline_mode:
         # change linear specific parameters
         args.epochs = 100
-        args.lr = 30
+        args.lr = 30.0
         args.momentum = 0.9
         args.weight_decay = 0
-        args.batch_size = 512
+        args.batch_size = 256
         args.pretrained = f"{args.output_dir}/checkpoint.pth"
         args.ckp_key = "model"
         args.val_freq = 1

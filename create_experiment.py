@@ -30,7 +30,7 @@ if __name__ == "__main__":
             raise ValueError(f"Dataset '{args.dataset}' has no default path. Specify path to dataset.")
 
     exp_name = f"{slurm_args.prefix}-{args.arch}-{args.dataset}-ep{args.epochs}-bs{args.batch_size}" \
-               f"-lr{args.lr}-wd{args.weight_decay}-mom{args.momentum}-seed{args.seed}-{slurm_args.suffix}"
+               f"-lr{args.lr}-wd{args.weight_decay}-mom{args.momentum}-{slurm_args.suffix}-seed{args.seed}"
     args.output_dir = output_dir = Path(exp_dir).joinpath(exp_name)
     print(f"Experiment: {output_dir}")
 

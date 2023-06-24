@@ -81,11 +81,11 @@ def main(args):
     normalize = transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])
     augmentation = [
         transforms.RandomResizedCrop(32, scale=(0.2, 1.)),
+        transforms.RandomHorizontalFlip(),
         transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
         transforms.RandomGrayscale(p=0.2),
-        # do not use blur for CIFAR
+        # do not use blur with CIFAR
         # transforms.RandomApply([transforms.GaussianBlur(3, (0.1, 2))], p=0.5),
-        transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         normalize
     ]
